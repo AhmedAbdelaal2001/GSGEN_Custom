@@ -101,10 +101,10 @@ tensorboard-data-server==0.7.1
 termcolor==2.3.0
 tifffile==2023.7.18
 tokenizers==0.13.3
-torch==2.0.1
-torchaudio==2.0.2
-torchtyping==0.1.4
-torchvision==0.15.2
+# torch==2.0.1
+# torchaudio==2.0.2
+# torchtyping==0.1.4
+# torchvision==0.15.2
 tqdm==4.66.1
 traitlets==5.9.0
 transformers==4.31.0
