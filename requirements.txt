@@ -109,7 +109,7 @@ tqdm==4.66.1
 traitlets==5.9.0
 transformers==4.31.0
 trimesh==3.23.1
-triton==2.0.0
+# triton==2.0.0
 typeguard==4.1.0
 tyro==0.5.5
 virtualenv==20.24.2

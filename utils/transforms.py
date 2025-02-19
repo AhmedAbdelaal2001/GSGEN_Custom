@@ -1,3 +1,4 @@
+from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -6,7 +7,9 @@ from kornia.geometry.conversions import (
     rotation_matrix_to_quaternion,
     quaternion_to_rotation_matrix,
 )
-from torchtyping import TensorType
+
+# Instead of importing torchtyping, simply use torch.Tensor.
+TensorType = torch.Tensor
 
 
 def qvec2rotmat(qvec):
@@ -31,18 +34,12 @@ def qvec2rotmat(qvec):
     )
 
 
-def qsvec2rotmat_batched(
-    qvec: TensorType["N", 4], svec: TensorType["N", 3]
-) -> TensorType["N", 3, 3]:
+def qsvec2rotmat_batched(qvec: torch.Tensor, svec: torch.Tensor) -> torch.Tensor:
+    # unscaled_rotmat: compute the rotation matrix from the quaternion qvec.
     unscaled_rotmat = quaternion_to_rotation_matrix(qvec, QuaternionCoeffOrder.WXYZ)
 
-    # TODO: check which I current think that scale should be copied row-wise since in eq (6) the S matrix is right-hand multplied to R
+    # Multiply the rotation matrix by the scale vector (unsqueezed appropriately).
     rotmat = svec.unsqueeze(-2) * unscaled_rotmat
-    # rotmat = svec.unsqueeze(-1) * unscaled_rotmat
-    # rotmat = torch.bmm(unscaled_rotmat, torch.diag(svec))
-
-    # print("rotmat", rotmat.shape)
-
     return rotmat
 
 
@@ -50,10 +47,10 @@ def rotmat2wxyz(rotmat):
     return rotation_matrix_to_quaternion(rotmat, order=QuaternionCoeffOrder.WXYZ)
 
 
-def qvec2rotmat_batched(qvec: TensorType["N", 4]):
+def qvec2rotmat_batched(qvec: torch.Tensor) -> torch.Tensor:
     return quaternion_to_rotation_matrix(qvec, QuaternionCoeffOrder.WXYZ)
 
 
-def qsvec2covmat_batched(qvec: TensorType["N", 4], svec: TensorType["N", 3]):
+def qsvec2covmat_batched(qvec: torch.Tensor, svec: torch.Tensor) -> torch.Tensor:
     rotmat = qsvec2rotmat_batched(qvec, svec)
     return torch.bmm(rotmat, rotmat.transpose(-1, -2))

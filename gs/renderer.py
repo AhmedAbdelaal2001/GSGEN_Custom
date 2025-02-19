@@ -1,10 +1,10 @@
-from typing import Any
+from typing import Any, Tuple
 import cv2
 from utils.camera import PerspectiveCameras
 from utils.transforms import qsvec2rotmat_batched, qvec2rotmat_batched
 from utils.misc import print_info, tic, toc
 import numpy as np
-from torchtyping import TensorType
+# Removed: from torchtyping import TensorType
 import torch
 import matplotlib.pyplot as plt
 from scipy.special import logit, expit
@@ -43,18 +43,18 @@ class Renderer:
         # call _C to cull
         pass
 
-    def project_pts(self, pts: torch.Tensor, c2w: TensorType["N", 3, 4]):
+    def project_pts(self, pts: torch.Tensor, c2w: torch.Tensor) -> torch.Tensor:
         d = -c2w[..., :3, 3]
         W = torch.transpose(c2w[..., :3, :3], -1, -2)
-
-        return torch.einsum("ij,bj->bi", W, pts + d)
+        ret = torch.einsum("ij,bj->bi", W, pts + d)
+        return ret
 
     def jacobian(self, u):
         l = torch.norm(u, dim=-1)
         print(l.shape)
         print(l.max())
         print(l.min())
-        J = torch.zeros(u.size(0), 3, 3).to(u)
+        J = torch.zeros(u.size(0), 3, 3, device=u.device, dtype=u.dtype)
         J[..., 0, 0] = 1.0 / u[..., 2]
         J[..., 2, 0] = u[..., 0] / l
         J[..., 1, 1] = 1.0 / u[..., 2]
@@ -63,48 +63,37 @@ class Renderer:
         J[..., 1, 2] = -u[..., 1] / u[..., 2] / u[..., 2]
         J[..., 2, 2] = u[..., 2] / l
         print_info(torch.det(J), "det(J)")
-
         return J
 
     def project_gaussian(
         self,
-        mean: TensorType["N", 3],
-        qvec: TensorType["N", 4],
-        svec: TensorType["N", 3],
+        mean: torch.Tensor,
+        qvec: torch.Tensor,
+        svec: torch.Tensor,
         camera: PerspectiveCameras,
         idx: int,
     ):
         projected_mean = self.project_pts(mean, camera.c2ws[idx]).contiguous()  # [N, 3]
         print_info(projected_mean[..., 2], "projected_mean_z")
-
         # test
         # projected_mean /= projected_mean[..., 2:]
-
         rotmat = qsvec2rotmat_batched(qvec, svec)
         # 3d gaussian paper eq (6)
         sigma = rotmat @ torch.transpose(rotmat, -1, -2)
-
         print_info(sigma, "sigma")
-
         W = torch.transpose(camera.c2ws[idx][:3, :3], -1, -2)
         print_info(W, "W")
         J = self.jacobian(projected_mean)
         print_info(J, "J")
         JW = torch.einsum("bij,jk->bik", J, W)
-
-        projected_cov = torch.bmm(torch.bmm(JW, sigma), torch.transpose(JW, -1, -2))[
-            ..., :2, :2
-        ].contiguous()
-        # projected_cov += torch.eye(2).to(projected_cov)
+        projected_cov = torch.bmm(torch.bmm(JW, sigma), torch.transpose(JW, -1, -2))[..., :2, :2].contiguous()
         print_info(projected_cov, "projected_cov")
         print_info(projected_cov[..., 0, 0], "projected_cov[..., 0, 0]")
-
         depth = projected_mean[..., 2:].clone().contiguous()
-
-        projected_mean = (
-            projected_mean[..., :2] / projected_mean[..., 2:]
-        ).contiguous()
-
+        if detach_depth:
+            projected_mean = projected_mean[..., :2].contiguous() / depth.detach()
+        else:
+            projected_mean = projected_mean[..., :2].contiguous() / depth
         return projected_mean, projected_cov, JW, depth
 
     def tile_partition(
@@ -115,25 +104,18 @@ class Renderer:
         n_tiles_h = H // self.tile_size + (H % self.tile_size > 0)
         n_tiles_w = W // self.tile_size + (W % self.tile_size > 0)
         n_tiles = n_tiles_h * n_tiles_w
-
         print(f"n_tiles_h: {n_tiles_h} and n_tiles_w: {n_tiles_w}")
-
         img_topleft = torch.FloatTensor(
             [-camera.cx / camera.fx, -camera.cy / camera.fy]
         ).to("cuda")
-
         img_bottomright = torch.FloatTensor(
             [(W - camera.cx) / camera.fx, (H - camera.cy) / camera.fy]
         ).to("cuda")
-
         print(f"img_topleft: {img_topleft}")
         print(f"img_bottomright: {img_bottomright}")
-
         num_gaussians = torch.zeros(n_tiles, dtype=torch.int32, device="cuda")
-
         pixel_size_x = 1.0 / camera.fx
         pixel_size_y = 1.0 / camera.fy
-
         _backend.count_num_gaussians_each_tile(
             mean,
             cov_inv,
@@ -147,7 +129,6 @@ class Renderer:
             thresh,
         )
         print(num_gaussians.sum().item())
-
         print_info(num_gaussians, "num_gaussians")
 
     def tile_partition_bcircle(
@@ -160,25 +141,18 @@ class Renderer:
         self.n_tiles_h = n_tiles_h
         self.n_tiles_w = n_tiles_w
         n_tiles = n_tiles_h * n_tiles_w
-
         print(f"n_tiles_h: {n_tiles_h} and n_tiles_w: {n_tiles_w}")
-
         img_topleft = torch.FloatTensor(
             [-camera.cx / camera.fx, -camera.cy / camera.fy]
         ).to("cuda")
-
         img_bottomright = torch.FloatTensor(
             [(W - camera.cx) / camera.fx, (H - camera.cy) / camera.fy]
         ).to("cuda")
-
         print(f"img_topleft: {img_topleft}")
         print(f"img_bottomright: {img_bottomright}")
-
         num_gaussians = torch.zeros(n_tiles, dtype=torch.int32, device="cuda")
-
         pixel_size_x = 1.0 / camera.fx
         pixel_size_y = 1.0 / camera.fy
-
         tic()
         _backend.count_num_gaussians_each_tile_bcircle(
             mean,
@@ -191,28 +165,13 @@ class Renderer:
             pixel_size_y,
             num_gaussians,
         )
-        # _backend.count_num_gaussians_each_tile(
-        #     mean,
-        #     cov,
-        #     img_topleft,
-        #     self.tile_size,
-        #     n_tiles_h,
-        #     n_tiles_w,
-        #     pixel_size_x,
-        #     pixel_size_y,
-        #     num_gaussians,
-        #     thresh,
-        # )
         toc()
         print(num_gaussians.sum().item())
-
         self.total_gaussians = num_gaussians.sum().item()
         self.num_gaussians = num_gaussians
-
         self.tiledepth = torch.zeros(
             self.total_gaussians, dtype=torch.float64, device="cuda"
         )
-
         print(f"total_gaussians: {self.total_gaussians}")
         print_info(num_gaussians, "num_gaussians")
 
@@ -225,33 +184,26 @@ class Renderer:
         n_tiles_h = H // self.tile_size + (H % self.tile_size > 0)
         n_tiles_w = W // self.tile_size + (W % self.tile_size > 0)
         n_tiles = n_tiles_h * n_tiles_w
-
         print(f"n_tiles_h: {n_tiles_h} and n_tiles_w: {n_tiles_w}")
-
         img_topleft = torch.FloatTensor(
             [-camera.cx / camera.fx, -camera.cy / camera.fy]
         ).to("cuda")
-
         img_bottomright = torch.FloatTensor(
             [(W - camera.cx) / camera.fx, (H - camera.cy) / camera.fy]
         ).to("cuda")
-
         print(f"img_topleft: {img_topleft}")
         print(f"img_bottomright: {img_bottomright}")
         print(self.num_gaussians.shape)
-
         pixel_size_x = 1.0 / camera.fx
         pixel_size_y = 1.0 / camera.fy
         self.offset = torch.zeros(n_tiles + 1, dtype=torch.int32, device="cuda")
         print_info(self.offset, "offset")
         print_info(self.num_gaussians, "num_gaussians")
         print_info(self.tiledepth, "tiledepth")
-
         num_gaussians_bkp = self.num_gaussians.clone()
         gaussian_ids = torch.zeros(
             self.total_gaussians, dtype=torch.int32, device="cuda"
         )
-
         tic()
         _backend.prepare_image_sort(
             gaussian_ids,
@@ -268,25 +220,8 @@ class Renderer:
             pixel_size_x,
             pixel_size_y,
         )
-        # _backend.image_sort(
-        #     gaussian_ids,
-        #     self.tiledepth,
-        #     depth,
-        #     self.num_gaussians,
-        #     self.offset,
-        #     mean,
-        #     cov,
-        #     img_topleft,
-        #     self.tile_size,
-        #     n_tiles_h,
-        #     n_tiles_w,
-        #     pixel_size_x,
-        #     pixel_size_y,
-        #     0.01,
-        # )
-        toc()
+        toc("radix sort")
         self.offset[-1] = self.total_gaussians
-
         print_info(self.offset, "offset")
         print_info(self.num_gaussians, "num_gaussians")
         print(f"original num_gaussians: {num_gaussians_bkp.sum().item()}")
@@ -295,22 +230,18 @@ class Renderer:
             (self.num_gaussians == num_gaussians_bkp).count_nonzero().item()
         )
         print(f"n_gaussians_check: {n_gaussians_check}")
-
         print_info(self.tiledepth, "tiledepth")
         print_info(gaussian_ids, "gaussian_ids")
         print_info(self.offset, "offset")
         diff = self.offset[1:] - self.offset[:-1]
         print_info(diff, "diff")
-
         out = torch.zeros([H * W * 3], dtype=torch.float32, device="cuda")
         alpha = (
             torch.ones([self.total_gaussians], dtype=torch.float32, device="cuda") * 1.0
         )
-
         print(self.offset[:100])
         print(gaussian_ids[:100])
         self.gaussian_ids = gaussian_ids
-
         print(cov.shape)
         print_info(
             cov[..., 0, 0],
@@ -321,13 +252,11 @@ class Renderer:
             "cov[..., 1, 1]",
         )
         print_info(torch.det(cov), "det(cov)")
-
         thresh = 0.001
         tic()
         _backend.tile_based_vol_rendering(
             mean,
             cov,
-            # torch.inverse(cov).contiguous(),
             color,
             alpha,
             self.offset,
@@ -343,20 +272,14 @@ class Renderer:
             W,
             thresh,
         )
-        toc()
-        # fig, ax = plt.subplots()
+        toc("render")
         print_info(out, "out")
         print(out.mean())
         print(out.std())
-        # ax.imshow(out.reshape(H, W, 3).cpu().numpy())
-        # plt.show()
-        # fig.savefig("out.png")
-
         img = (out.reshape(H, W, 3).cpu().numpy() * 255.0).astype(np.uint8)
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         cv2.imwrite("tmp/forward_out.png", img)
         print("nans:", torch.count_nonzero(torch.isnan(out)).item())
-
         return out
 
     def render_loop(self):
@@ -366,7 +289,7 @@ class Renderer:
 @torch.no_grad()
 def jacobian(u):
     l = torch.norm(u, dim=-1)
-    J = torch.zeros(u.size(0), 3, 3).to(u)
+    J = torch.zeros(u.size(0), 3, 3, device=u.device, dtype=u.dtype)
     J[..., 0, 0] = 1.0 / u[..., 2]
     J[..., 2, 0] = u[..., 0] / l
     J[..., 1, 1] = 1.0 / u[..., 2]
@@ -374,28 +297,25 @@ def jacobian(u):
     J[..., 0, 2] = -u[..., 0] / u[..., 2] / u[..., 2]
     J[..., 1, 2] = -u[..., 1] / u[..., 2] / u[..., 2]
     J[..., 2, 2] = u[..., 2] / l
-
     return J
 
 
 @lineprofiler
-def project_pts(pts: torch.Tensor, c2w: TensorType["N", 3, 4]):
+def project_pts(pts: torch.Tensor, c2w: torch.Tensor) -> torch.Tensor:
     d = -c2w[..., :3, 3]
     W = torch.transpose(c2w[..., :3, :3], -1, -2)
-
     ret = torch.einsum("ij,bj->bi", W, pts + d)
-
     return ret
 
 
 @lineprofiler
 def project_gaussians(
-    mean: TensorType["N", 3],
-    qvec: TensorType["N", 4],
-    svec: TensorType["N", 3],
-    c2w: TensorType[3, 4],
+    mean: torch.Tensor,
+    qvec: torch.Tensor,
+    svec: torch.Tensor,
+    c2w: torch.Tensor,
     detach_depth: bool = False,
-):
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     projected_mean = project_pts(mean, c2w)
     rotmat = qsvec2rotmat_batched(qvec, svec)
     sigma = rotmat @ torch.transpose(rotmat, -1, -2)
@@ -403,21 +323,12 @@ def project_gaussians(
     J = jacobian(projected_mean)
     JW = torch.einsum("bij,jk->bik", J, W)
     assert JW.grad is None, "JW should not be updated"
-    projected_cov = torch.bmm(torch.bmm(JW, sigma), torch.transpose(JW, -1, -2))[
-        ..., :2, :2
-    ].contiguous()
-    # depth is always differentiable whether detach_depth is True or False
+    projected_cov = torch.bmm(torch.bmm(JW, sigma), torch.transpose(JW, -1, -2))[..., :2, :2].contiguous()
     depth = projected_mean[..., 2:].clone().contiguous()
-
-    ###
-    ### HUGE CAUTION HERE !!! the denominator here is detached
-    ###
-    # projected_mean = (projected_mean[..., :2] / projected_mean[..., 2:]).contiguous()
     if detach_depth:
         projected_mean = projected_mean[..., :2].contiguous() / depth.detach()
     else:
         projected_mean = projected_mean[..., :2].contiguous() / depth
-
     return projected_mean, projected_cov, JW, depth
 
 
@@ -473,7 +384,6 @@ class _render(torch.autograd.Function):
             W,
             thresh,
         ]
-
         return out
 
     @staticmethod
@@ -493,7 +403,6 @@ class _render(torch.autograd.Function):
             W,
             thresh,
         ) = ctx.const
-
         _backend.tile_based_vol_rendering_backward(
             mean,
             cov,
@@ -517,7 +426,6 @@ class _render(torch.autograd.Function):
             W,
             thresh,
         )
-
         return (
             grad_mean,
             grad_cov,
@@ -592,7 +500,6 @@ class _render_start_end(torch.autograd.Function):
             W,
             thresh,
         ]
-
         return out
 
     @staticmethod
@@ -622,7 +529,6 @@ class _render_start_end(torch.autograd.Function):
             W,
             thresh,
         ) = ctx.const
-
         tic()
         _backend.tile_based_vol_rendering_backward_start_end(
             mean,
@@ -649,7 +555,6 @@ class _render_start_end(torch.autograd.Function):
             thresh,
         )
         toc("render backward")
-
         return (
             grad_mean,
             grad_cov,
@@ -741,7 +646,6 @@ class _render_sh(torch.autograd.Function):
             C,
             thresh,
         ]
-
         return out
 
     @staticmethod
@@ -758,7 +662,6 @@ class _render_sh(torch.autograd.Function):
             topleft,
             c2w,
         ) = ctx.saved_tensors
-
         grad_mean = torch.zeros_like(mean)
         grad_cov = torch.zeros_like(cov)
         grad_sh_coeffs = torch.zeros_like(sh_coeffs)
@@ -774,7 +677,6 @@ class _render_sh(torch.autograd.Function):
             C,
             thresh,
         ) = ctx.const
-
         tic()
         torch.cuda.profiler.cudart().cudaProfilerStart()
         _backend.tile_based_vol_rendering_backward_sh(
@@ -805,9 +707,6 @@ class _render_sh(torch.autograd.Function):
         )
         torch.cuda.profiler.cudart().cudaProfilerStop()
         toc("render backward")
-
-        # print_info(grad_mean, "grad_mean")
-
         return (
             grad_mean,
             grad_cov,
@@ -903,7 +802,6 @@ class _render_sh_bg(torch.autograd.Function):
             C,
             thresh,
         ]
-
         return out
 
     @staticmethod
@@ -921,7 +819,6 @@ class _render_sh_bg(torch.autograd.Function):
             c2w,
             bg_rgb,
         ) = ctx.saved_tensors
-
         grad = grad.contiguous()
         grad_mean = torch.zeros_like(mean)
         grad_cov = torch.zeros_like(cov)
@@ -938,7 +835,6 @@ class _render_sh_bg(torch.autograd.Function):
             C,
             thresh,
         ) = ctx.const
-
         tic()
         torch.cuda.profiler.cudart().cudaProfilerStart()
         _backend.tile_based_vol_rendering_backward_sh_with_bg(
@@ -970,9 +866,6 @@ class _render_sh_bg(torch.autograd.Function):
         )
         torch.cuda.profiler.cudart().cudaProfilerStop()
         toc("render backward")
-
-        # print_info(grad_mean, "grad_mean")
-
         return (
             grad_mean,
             grad_cov,
@@ -1052,7 +945,6 @@ class _render_scalar(torch.autograd.Function):
             W,
             thresh,
         ]
-
         return out
 
     @staticmethod
@@ -1082,7 +974,6 @@ class _render_scalar(torch.autograd.Function):
             W,
             thresh,
         ) = ctx.const
-
         tic()
         _backend.tile_based_vol_rendering_scalar_backward(
             mean,
@@ -1109,7 +1000,6 @@ class _render_scalar(torch.autograd.Function):
             thresh,
         )
         toc("render backward")
-
         return (
             grad_mean,
             grad_cov,
@@ -1176,17 +1066,14 @@ class _render_with_T(torch.autograd.Function):
             thresh,
             T,
         )
-
         if torch.isnan(out).any():
             console.print("[red]In line 1181")
         out = out + T * bg
-
         if torch.isnan(bg).any():
             breakpoint()
             console.print("[red]bg!!!!")
         if torch.isnan(T).any():
             console.print("[red]T!!!!")
-
         ctx.save_for_backward(
             mean, cov, scalar, alpha, start, end, gaussian_ids, out, topleft, T
         )
@@ -1200,7 +1087,6 @@ class _render_with_T(torch.autograd.Function):
             W,
             thresh,
         ]
-
         if torch.isnan(out).any():
             console.print("[red]In line 1197")
         return out
@@ -1234,7 +1120,6 @@ class _render_with_T(torch.autograd.Function):
             W,
             thresh,
         ) = ctx.const
-
         tic()
         _backend.tile_based_vol_rendering_backward_start_end(
             mean,
@@ -1261,7 +1146,6 @@ class _render_with_T(torch.autograd.Function):
             thresh,
         )
         toc("render backward")
-
         return (
             grad_mean,
             grad_cov,
@@ -1297,47 +1181,30 @@ class GaussianRenderer(torch.nn.Module):
         self.device = cfg.device
         self.cfg = cfg
         self.N = pts.shape[0]
-        self.mean = torch.nn.parameter.Parameter(pts)
+        self.mean = torch.nn.Parameter(pts)
         self.qvec = torch.nn.Parameter(torch.zeros([self.N, 4]))
         self.qvec.data[..., 0] = 1.0
-
         self.svec_before_activation = torch.nn.Parameter(torch.ones([self.N, 3]))
         self.color_before_activation = torch.nn.Parameter(rgb)
         self.alpha_before_activation = torch.nn.Parameter(torch.ones([self.N]))
-
         self.svec_act = activations[cfg.svec_act]
         self.color_act = activations[cfg.color_act]
         self.alpha_act = activations[cfg.alpha_act]
-
         self.svec_inv_act = inv_activations[cfg.svec_act]
         self.color_inv_act = inv_activations[cfg.color_act]
         self.alpha_inv_act = inv_activations[cfg.alpha_act]
-
         self.svec_before_activation.data.fill_(self.svec_inv_act(cfg.svec_init))
         self.color_before_activation.data = self.color_inv_act(rgb)
         self.alpha_before_activation.data.fill_(self.alpha_inv_act(cfg.alpha_init))
-
         self.set_cfg(cfg)
 
     def set_cfg(self, cfg):
-        # camera imaging params
-        # !! deprecated: should be provided in `camera_info` when calling forward
-        # self.near_plane = cfg.near_plane
-        # self.far_plane = cfg.far_plane
         self.tile_size = cfg.tile_size
-
-        # frustum culling params
         self.frustum_culling_radius = cfg.frustum_culling_radius
-
-        # tile culling params
         self.tile_culling_type = cfg.tile_culling_type
         self.tile_culling_radius = cfg.tile_culling_radius
         self.tile_culling_thresh = cfg.tile_culling_thresh
-
-        # rendering params
         self.T_thresh = cfg.T_thresh
-
-        # adaptive control params
         self.adaptive_control_iteration = cfg.adaptive_control_iteration
         self.pos_grad_thresh = cfg.pos_grad_thresh
         self.split_scale_thresh = cfg.split_scale_thresh
@@ -1364,43 +1231,30 @@ class GaussianRenderer(torch.nn.Module):
         svec = self.svec[mask].contiguous()
         color = self.color[mask].contiguous()
         alpha = self.alpha[mask].contiguous()
-
         pixel_size_x = 1.0 / camera_info.fx
         pixel_size_y = 1.0 / camera_info.fy
-
         mean, cov, JW, depth = project_gaussians(mean, qvec, svec, c2w)
-
-        # depth = depth.squeeze()
-        # depth = depth.max() - depth + 0.3
-
         cov = (cov + cov.transpose(-1, -2)) / 2.0
         with torch.no_grad():
             m = (cov[..., 0, 0] + cov[..., 1, 1]) / 2.0
             p = torch.det(cov)
             radius = torch.sqrt(m + torch.sqrt((m.pow(2) - p).clamp(min=0.0)))
-
         self.depth = depth
         self.radius = radius
-
         if self.cfg.debug:
             print_info(radius, "radius")
-
         H, W = camera_info.h, camera_info.w
         n_tiles_h = H // self.tile_size + (H % self.tile_size > 0)
         n_tiles_w = W // self.tile_size + (W % self.tile_size > 0)
         n_tiles = n_tiles_h * n_tiles_w
-
         if self.cfg.debug:
             print("n_tiles", n_tiles)
-
         img_topleft = torch.FloatTensor(
             [-camera_info.cx / camera_info.fx, -camera_info.cy / camera_info.fy],
         ).to(self.device)
-
         num_gaussians = torch.zeros(n_tiles, dtype=torch.int32, device=self.device)
         pixel_size_x = 1.0 / camera_info.fx
         pixel_size_y = 1.0 / camera_info.fy
-
         tic()
         with torch.no_grad():
             if self.tile_culling_type == "bcircle":
@@ -1431,9 +1285,7 @@ class GaussianRenderer(torch.nn.Module):
             else:
                 raise NotImplementedError
         toc("tile culling")
-
         self.total_dub_gaussians = num_gaussians.sum().item()
-
         tiledepth = torch.zeros(
             self.total_dub_gaussians, dtype=torch.float64, device=self.device
         )
@@ -1441,7 +1293,6 @@ class GaussianRenderer(torch.nn.Module):
         gaussian_ids = torch.zeros(
             self.total_dub_gaussians, dtype=torch.int32, device=self.device
         )
-
         tic()
         with torch.no_grad():
             if self.tile_culling_type == "bcircle":
@@ -1481,10 +1332,6 @@ class GaussianRenderer(torch.nn.Module):
                 raise NotImplementedError
         toc("radix sort")
         offset[-1] = self.total_dub_gaussians
-
-        # if self.cfg.debug:
-        #     _backend.debug_check_tiledepth(offset.cpu(), tiledepth.cpu())
-
         tic()
         out = render(
             mean,
@@ -1504,7 +1351,6 @@ class GaussianRenderer(torch.nn.Module):
             self.T_thresh,
         ).view(H, W, 3)
         toc("render")
-
         return out
 
     @lineprofiler
@@ -1526,15 +1372,11 @@ class GaussianRenderer(torch.nn.Module):
         svec = self.svec[mask].contiguous()
         color = self.color[mask].contiguous()
         alpha = self.alpha[mask].contiguous()
-
         pixel_size_x = 1.0 / camera_info.fx
         pixel_size_y = 1.0 / camera_info.fy
-
         mean, cov, JW, depth = project_gaussians(mean, qvec, svec, c2w)
-
         self.depth = depth
         self.radius = None
-
         tic()
         N_with_dub, aabb_topleft, aabb_bottomright = tile_culling_aabb_count(
             mean,
@@ -1544,9 +1386,7 @@ class GaussianRenderer(torch.nn.Module):
             self.tile_culling_radius,
         )
         toc("count N with dub")
-
         self.total_dub_gaussians = N_with_dub
-
         H, W = camera_info.h, camera_info.w
         n_tiles_h = H // self.tile_size + (H % self.tile_size > 0)
         n_tiles_w = W // self.tile_size + (W % self.tile_size > 0)
@@ -1559,7 +1399,6 @@ class GaussianRenderer(torch.nn.Module):
         pixel_size_x = 1.0 / camera_info.fx
         pixel_size_y = 1.0 / camera_info.fy
         gaussian_ids = torch.zeros([N_with_dub], dtype=torch.int32, device=self.device)
-
         tic()
         _backend.tile_culling_aabb_start_end(
             aabb_topleft,
@@ -1572,7 +1411,6 @@ class GaussianRenderer(torch.nn.Module):
             n_tiles_w,
         )
         toc("tile culling aabb")
-
         tic()
         out = render_start_end(
             mean,
@@ -1593,7 +1431,6 @@ class GaussianRenderer(torch.nn.Module):
             self.T_thresh,
         ).view(H, W, 3)
         toc("render")
-
         return out
 
     def forward(self, c2w, camera_info):
@@ -1621,67 +1458,40 @@ class GaussianRenderer(torch.nn.Module):
         svec_mask = (self.svec.data > self.split_scale_thresh).any(dim=-1)
         split_mask = torch.logical_and(mean_mask, svec_mask)
         clone_mask = torch.logical_and(mean_mask, torch.logical_not(split_mask))
-
         num_split = split_mask.sum().item()
         num_clone = clone_mask.sum().item()
-
         console.print(f"[red bold]num_split {num_split} num_clone {num_clone}")
-
         num_new_gaussians = num_split + num_clone
-
         split_mean = self.mean.data[split_mask].repeat(2, 1)
         split_qvec = self.qvec.data[split_mask].repeat(2, 1)
         split_svec = self.svec.data[split_mask].repeat(2, 1)
-        # split_svec_ba = self.svec_before_activation.data[split_mask].repeat(2, 1)
         split_color_ba = self.color_before_activation.data[split_mask].repeat(2, 1)
         split_alpha_ba = self.alpha_before_activation.data[split_mask].repeat(2)
         split_rotmat = qvec2rotmat_batched(split_qvec).transpose(-1, -2)
-
         split_gn = torch.randn(num_split * 2, 3, device=self.mean.device) * split_svec
-
         split_sampled_mean = split_mean + torch.einsum(
             "bij, bj -> bi", split_rotmat, split_gn
         )
-
-        # check left product or right product
-
         old_num_gaussians = self.N
         unchanged_gaussians = old_num_gaussians - num_split
         self.N += num_new_gaussians
         console.print(f"[red bold]num gaussians: {self.N}")
-
         new_mean = torch.zeros([self.N, 3], device=self.device)
         new_qvec = torch.zeros([self.N, 4], device=self.device)
         new_svec = torch.zeros([self.N, 3], device=self.device)
         new_color = torch.zeros([self.N, 3], device=self.device)
         new_alpha = torch.zeros([self.N], device=self.device)
-
-        # copy old gaussians
         new_mean[:unchanged_gaussians] = self.mean.data[~split_mask]
         new_qvec[:unchanged_gaussians] = self.qvec.data[~split_mask]
         new_svec[:unchanged_gaussians] = self.svec_before_activation.data[~split_mask]
         new_color[:unchanged_gaussians] = self.color_before_activation.data[~split_mask]
         new_alpha[:unchanged_gaussians] = self.alpha_before_activation.data[~split_mask]
-
-        # clone gaussians
-        new_mean[
-            unchanged_gaussians : unchanged_gaussians + num_clone
-        ] = self.mean.data[clone_mask]
-        new_qvec[
-            unchanged_gaussians : unchanged_gaussians + num_clone
-        ] = self.qvec.data[clone_mask]
-        new_svec[
-            unchanged_gaussians : unchanged_gaussians + num_clone
-        ] = self.svec_before_activation.data[clone_mask]
-        new_color[
-            unchanged_gaussians : unchanged_gaussians + num_clone
-        ] = self.color_before_activation.data[clone_mask]
-        new_alpha[
-            unchanged_gaussians : unchanged_gaussians + num_clone
-        ] = self.alpha_before_activation.data[clone_mask]
-
+        new_mean[unchanged_gaussians : unchanged_gaussians + num_clone] = self.mean.data[clone_mask]
+        new_qvec[unchanged_gaussians : unchanged_gaussians + num_clone] = self.qvec.data[clone_mask]
+        new_svec[unchanged_gaussians : unchanged_gaussians + num_clone] = self.svec_before_activation.data[clone_mask]
+        new_color[unchanged_gaussians : unchanged_gaussians + num_clone] = self.color_before_activation.data[clone_mask]
+        new_alpha[unchanged_gaussians : unchanged_gaussians + num_clone] = self.alpha_before_activation.data[clone_mask]
         pts = unchanged_gaussians + num_clone
-
         new_mean[pts : pts + 2 * num_split] = split_sampled_mean
         new_qvec[pts : pts + 2 * num_split] = split_qvec
         new_color[pts : pts + 2 * num_split] = split_color_ba
@@ -1689,7 +1499,6 @@ class GaussianRenderer(torch.nn.Module):
         new_svec[pts : pts + 2 * num_split] = self.svec_inv_act(
             split_svec / self.scale_shrink_factor
         )
-
         self.mean = torch.nn.Parameter(new_mean)
         self.qvec = torch.nn.Parameter(new_qvec)
         self.svec_before_activation = torch.nn.Parameter(new_svec)
@@ -1709,7 +1518,6 @@ class GaussianRenderer(torch.nn.Module):
         self.svec_before_activation = torch.nn.Parameter(
             self.svec_before_activation.data[mask]
         )
-
         removed = self.N - self.mean.shape[0]
         self.N = self.mean.shape[0]
         console.print("[yellow]remove_low_alpha_gaussians[/yellow]")
@@ -1731,7 +1539,6 @@ class GaussianRenderer(torch.nn.Module):
             self.remove_low_alpha_gaussians()
         if step_check(iteration, self.alpha_reset_period, run_at_zero=False):
             self.reset_alpha()
-
         if step_check(iteration, self.adaptive_control_iteration):
             self.split_gaussians()
 
@@ -1740,8 +1547,6 @@ class GaussianRenderer(torch.nn.Module):
         print_info(self.svec_before_activation.grad, "grad_svec")
 
     def check_info(self):
-        # print_info(self.qvec, "qvec")
-        # print_info(self.svec, "svec")
         pass
 
     def log_n_gaussian_dub(self, writer, step):
@@ -1784,7 +1589,6 @@ class GaussianRenderer(torch.nn.Module):
 
     @torch.no_grad()
     def log_bounds(self, writer, step):
-        """log the bounds of the parameters"""
         writer.add_scalar("bounds/mean_max", self.mean.max(), step)
         writer.add_scalar("bounds/mean_min", self.mean.min(), step)
         writer.add_scalar("bounds/qvec_max", self.qvec.max(), step)
@@ -1798,12 +1602,10 @@ class GaussianRenderer(torch.nn.Module):
 
     @torch.no_grad()
     def log_depth_and_radius(self, writer, step):
-        """log the bounds of the parameters"""
         if self.depth is not None:
             writer.add_scalar("bounds/depth_max", self.depth.max(), step)
             writer.add_scalar("bounds/depth_min", self.depth.min(), step)
             writer.add_scalar("bounds/depth_mean", self.depth.mean(), step)
-
         if self.radius is not None:
             writer.add_scalar("bounds/radius_mean", self.radius.mean(), step)
             writer.add_scalar("bounds/radius_max", self.radius.max(), step)
@@ -1830,12 +1632,11 @@ class GaussianRenderer(torch.nn.Module):
             "N": self.N,
             "cfg": self.cfg,
         }
-
         torch.save(state_dict, path)
 
     @classmethod
-    def load(self, path):
+    def load(cls, path):
         state_dict = torch.load(path)
-        renderer = Renderer(
-            state_dict["cfg"],
-        )
+        renderer = GaussianRenderer(state_dict["cfg"], None, None)
+        # Add code to initialize renderer parameters from state_dict as needed
+        return renderer

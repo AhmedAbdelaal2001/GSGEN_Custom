@@ -1,18 +1,16 @@
 import torch
 import numpy as np
-from torchtyping import TensorType
 from utils.camera import CameraInfo
 from typing import Tuple
 
-
 @torch.no_grad()
 def tile_culling_aabb_count(
-    mean: TensorType["N", 2],
-    cov: TensorType["N", 2, 2],
+    mean: torch.Tensor,
+    cov: torch.Tensor,
     tile_size: int,
     camera_info: CameraInfo,
     D: float,
-) -> Tuple[int, TensorType["N", 2], TensorType["N", 2]]:
+) -> Tuple[int, torch.Tensor, torch.Tensor]:
     centers = mean
     aabb_x = torch.sqrt(D * cov[:, 0, 0])
     aabb_y = torch.sqrt(D * cov[:, 1, 1])
