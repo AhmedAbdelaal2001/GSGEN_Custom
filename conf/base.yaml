@@ -1,7 +1,7 @@
 device: cuda
 batch_size: 4
 grad_accum: 1
-max_steps: 1500
+max_steps: 701
 huggingface_offline: true
 use_bg: true
 rgb_only: false
@@ -31,11 +31,11 @@ init:
   mean_std: 0.8
   svec_val: 0.02
   alpha_val: 0.8
-  random_color: true
+  random_color: false
   facex: true
 eval:
   image_period: 100
-  video_period: 500
+  video_period: 100
   elevation: 45
   n_frames: 30
   n_circles: 1
@@ -153,7 +153,7 @@ renderer:
   densify:
     enabled: true
     type: official
-    warm_up: 500
+    warm_up: 0
     end: 9999
     period: 100
     mean2d_thresh: 0.02
