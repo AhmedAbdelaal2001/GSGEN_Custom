@@ -153,9 +153,9 @@ renderer:
   densify:
     enabled: true
     type: official
-    warm_up: 2000
+    warm_up: 500
     end: 9999
-    period: 1000
+    period: 100
     mean2d_thresh: 0.02
     split_thresh: 0.02
     n_splits: 2
@@ -168,7 +168,7 @@ renderer:
     radii2d_thresh: 1000
     alpha_thresh: 1000
     radii3d_thresh: 0.0
-    period: 500
+    period: 100
   penalty:
     alpha:
       type: center_weighted
@@ -187,3 +187,18 @@ auxiliary:
   mean_only: true
   normalize: false
   grad_clip: null
+upsample_tune:
+  enabled: true
+  num_poses: 1000       # Total number of poses (adjust as needed)
+  batch_size: 4         # Should match your training batch size
+  reso: 512             # Resolution for tuning (or another value as desired)
+  epoch: 10             # Number of epochs for the tuning phase
+  loss:
+    sds: 0.1            # Weight for the SDS loss during tuning
+    rgb: 0.01           # Weight for the image (RGB) loss during tuning
+  densify: false        # Optionally, enable/disable densification during tuning
+  lr: 0.0001            # Learning rate for tuning (if different from main training)
+  optimizer:
+    type: Adam
+    opt_args:
+      eps: 1.0e-15
