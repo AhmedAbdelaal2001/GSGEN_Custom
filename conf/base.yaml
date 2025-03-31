@@ -1,7 +1,7 @@
 device: cuda
 batch_size: 4
 grad_accum: 1
-max_steps: 15000
+max_steps: 150
 huggingface_offline: true
 use_bg: true
 rgb_only: false
